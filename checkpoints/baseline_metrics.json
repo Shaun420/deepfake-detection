@@ -1,0 +1,10 @@
+{
+  "pixel-LR": {
+    "accuracy": 0.476,
+    "roc_auc": 0.485256
+  },
+  "fft-LR": {
+    "accuracy": 0.75,
+    "roc_auc": 0.814044
+  }
+}
