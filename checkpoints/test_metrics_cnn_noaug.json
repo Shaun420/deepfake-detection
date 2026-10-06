@@ -1,0 +1,20 @@
+{
+  "data_source": "SyntheticFaceDataset (procedural surrogate)",
+  "n_test": 2000,
+  "accuracy": 0.8895,
+  "precision_fake": 0.8845014807502468,
+  "recall_fake": 0.896,
+  "f1_fake": 0.8902136115250869,
+  "roc_auc": 0.962697,
+  "eer": 0.10749999999999998,
+  "confusion_matrix": [
+    [
+      883,
+      117
+    ],
+    [
+      104,
+      896
+    ]
+  ]
+}

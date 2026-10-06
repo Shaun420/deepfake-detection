@@ -1,0 +1,26 @@
+{
+  "best": {
+    "64": {
+      "clip_accuracy": 0.8,
+      "mean_per_frame_accuracy": 0.7208333333333333,
+      "n_clips": 40
+    },
+    "256": {
+      "clip_accuracy": 0.95,
+      "mean_per_frame_accuracy": 0.7125,
+      "n_clips": 40
+    }
+  },
+  "cnn_noaug": {
+    "64": {
+      "clip_accuracy": 0.5,
+      "mean_per_frame_accuracy": 0.6541666666666667,
+      "n_clips": 40
+    },
+    "256": {
+      "clip_accuracy": 0.7,
+      "mean_per_frame_accuracy": 0.6458333333333334,
+      "n_clips": 40
+    }
+  }
+}
