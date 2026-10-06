@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.venv/
+data/
+# checkpoint is small (2.3 MB) and kept for reproducibility
+train_log.txt
