@@ -84,6 +84,27 @@ def main():
     sfx = "" if stem == "best" else f"_{stem}"
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     ck = torch.load(args.ckpt, map_location=device, weights_only=False)
+    checkpoint_args = ck.get("args", {})
+    checkpoint_source = ck.get("data_source") or ""
+    saved_data_root = checkpoint_args.get("data_root")
+    if args.data_root is None:
+        if checkpoint_source.startswith("FaceFolderDataset"):
+            if saved_data_root and Path(saved_data_root).is_dir():
+                args.data_root = saved_data_root
+            else:
+                raise FileNotFoundError(
+                    "This checkpoint was trained on a real image corpus, but its recorded "
+                    f"data root is unavailable ({saved_data_root!r}). Pass --data-root to "
+                    "the corpus; evaluating on synthetic data would be misleading.")
+        elif (not checkpoint_source and saved_data_root and
+              Path(saved_data_root).is_dir()):
+            # Older checkpoints did not save the actual data source.
+            args.data_root = saved_data_root
+        elif not checkpoint_source and saved_data_root:
+            print("Warning: checkpoint records a missing data root and has no source "
+                  "metadata; test metrics will use the synthetic surrogate unless "
+                  "--data-root is supplied.")
+
     model = build_model(ck.get("model", "cnn"), pretrained=False).to(device)
     model.load_state_dict(ck["state_dict"])
 

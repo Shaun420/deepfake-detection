@@ -51,7 +51,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--ckpt", default="checkpoints/best.pt")
     ap.add_argument("--data-root", default=None,
-                    help="real corpus root; uses its test split when present")
+                    help="real corpus root; omit this for a synthetic checkpoint")
     ap.add_argument("--img-size", type=int, default=None,
                     help="override input resolution (defaults to checkpoint args)")
     ap.add_argument("--n", type=int, default=6, help="samples per class")
@@ -61,6 +61,30 @@ def main():
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     ck = torch.load(args.ckpt, map_location=device, weights_only=False)
+    ck_args = ck.get("args", {})
+    checkpoint_source = ck.get("data_source") or ""
+    saved_data_root = ck_args.get("data_root")
+
+    if args.data_root is None:
+        if checkpoint_source.startswith("SyntheticFaceDataset"):
+            pass  # Preserve the checkpoint's synthetic data provenance.
+        elif checkpoint_source.startswith("FaceFolderDataset"):
+            if saved_data_root and Path(saved_data_root).is_dir():
+                args.data_root = saved_data_root
+            else:
+                raise FileNotFoundError(
+                    "This checkpoint was trained on a real image corpus, but its recorded "
+                    f"data root is unavailable ({saved_data_root!r}). Pass --data-root to a "
+                    "valid corpus; synthetic Grad-CAM would not explain this checkpoint.")
+        elif saved_data_root:
+            if Path(saved_data_root).is_dir():
+                # Older checkpoints did not record their actual data source.
+                args.data_root = saved_data_root
+            else:
+                print("Warning: this older checkpoint records a data root that is missing "
+                      "and has no source metadata; using the synthetic surrogate. "
+                      "Pass --data-root to analyze a real corpus.")
+
     model = build_model(ck.get("model", "cnn"), pretrained=False).to(device)
     model.load_state_dict(ck["state_dict"])
     model.eval()
@@ -69,10 +93,26 @@ def main():
 
     if args.data_root:
         root = Path(args.data_root)
-        test_root = root / "test" if (root / "test").is_dir() else root
-        ds = FaceFolderDataset(
-            str(test_root), size=size,
-            transform=build_transforms(False, size), train=False)
+        if not root.is_dir():
+            raise FileNotFoundError(
+                f"--data-root '{root}' does not exist. Prepare the real corpus first. "
+                "If this checkpoint was trained on the synthetic surrogate, omit --data-root.")
+        if (root / "train").is_dir():
+            if not (root / "test").is_dir():
+                raise FileNotFoundError(
+                    f"real corpus '{root}' has no test/ split for Grad-CAM. "
+                    "Expected data/test/{real,fake}/... .")
+            test_root = root / "test"
+        else:
+            test_root = root
+        try:
+            ds = FaceFolderDataset(
+                str(test_root), size=size,
+                transform=build_transforms(False, size), train=False)
+        except FileNotFoundError as exc:
+            raise FileNotFoundError(
+                f"No real/fake class folders were found in Grad-CAM split '{test_root}'. "
+                "For a synthetic checkpoint, omit --data-root.") from exc
         by_label = {0: [], 1: []}
         for index, (_, label) in enumerate(ds.items):
             by_label[label].append(index)

@@ -393,7 +393,7 @@ tuning on the test set:
 
 ```bash
 python src/train.py --data-root data --model resnet18 --img-size 128 \
-  --epochs 8 --num-workers 4 --cache --class-weights
+  --epochs 8 --cache --class-weights  # workers are auto-tuned; override if needed
 python src/evaluate.py --ckpt checkpoints/best.pt --data-root data --img-size 128
 python src/gradcam.py  --ckpt checkpoints/best.pt --data-root data --img-size 128
 ```
@@ -401,9 +401,9 @@ python src/gradcam.py  --ckpt checkpoints/best.pt --data-root data --img-size 12
 An exploratory Kaggle run gave **0.5591 accuracy on 499 test images**, below the
 **0.7796 all-fake majority baseline**, despite **0.6944 balanced accuracy** and
 **0.786 ROC-AUC**. These numbers are a warning, not a success claim: until the audit is
-run, it is not known how much of the AUC reflects metadata leakage. The Grad-CAM command
-must include `--data-root`; otherwise it explains the procedural surrogate rather than the
-corpus used to train the checkpoint.
+run, it is not known how much of the AUC reflects metadata leakage. New checkpoints record
+their source and data root; Grad-CAM reuses that root when it is available, otherwise pass
+`--data-root` to explain real-data checkpoints rather than the procedural surrogate.
 
 All headline figures in §§5–7 remain synthetic. In particular, the `0.889` confusion
 matrix over 2,000 balanced images is the `cnn_noaug` surrogate result, and the demo video
