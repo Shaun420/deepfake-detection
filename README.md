@@ -39,7 +39,7 @@ The augmentation costs 6 points of image accuracy but takes clip accuracy from 0
 src/
   data.py        dataset: real-corpus loader + procedural surrogate generator
   model.py       DeepfakeCNN (from scratch) and an optional ResNet-18 transfer baseline
-  train.py       training loop (AdamW, cosine LR, label smoothing, grad clipping)
+  train.py       device-aware fast training (AMP, pinned/prefetched data, fused CUDA AdamW)
   evaluate.py    test metrics, confusion matrix, ROC/PR curves, score histogram
   gradcam.py     Grad-CAM explainability on the last conv block
   analysis.py    azimuthally averaged FFT power spectrum of both classes
@@ -69,7 +69,7 @@ pip install -r requirements.txt
 python src/data.py                                           # figures/dataset_samples.png
 python src/analysis.py                                       # figures/frequency_analysis.png
 python src/baselines.py                                      # classical baselines
-python src/train.py --epochs 15 --n-train 6000 --n-val 1200  # ~35 min on CPU
+python src/train.py --epochs 15 --n-train 6000 --n-val 1200  # auto-selects the fastest available device
 python src/train.py --epochs 15 --n-train 6000 --no-rescale-aug --name cnn_noaug  # ablation
 python src/video_eval.py --ckpts checkpoints/best.pt checkpoints/cnn_noaug.pt     # video table
 python src/evaluate.py --n-test 2000                         # metrics + all plots
@@ -77,7 +77,21 @@ python src/gradcam.py --n 6                                  # figures/gradcam.p
 python src/predict.py --ckpt checkpoints/best.pt --image some_face.jpg
 ```
 
-Everything is seeded (`--seed 42`) and runs on CPU; a GPU is used automatically if present.
+Training auto-selects CUDA, then Apple MPS, then CPU. On CUDA it enables mixed precision
+(bfloat16 where supported, otherwise scaled float16), channels-last tensors, pinned and
+non-blocking transfers, cuDNN autotuning/TF32, and fused AdamW when available. CPU
+training chooses a worker/thread combination based on the CPUs available to the process;
+set `--num-workers 0` or `--cpu-threads N` to override it. The test split is not decoded
+or rendered during training, and progress metrics avoid forcing a GPU synchronization on
+every batch.
+
+```bash
+python src/train.py --device cuda --batch-size 128  # if GPU memory allows; workers are auto-tuned
+python src/train.py --device cpu  # auto-tunes CPU threads and data workers
+```
+
+Training is seeded (`--seed 42`); cuDNN autotuning prioritizes throughput, so exact
+bit-for-bit reproducibility across hardware and library versions is not guaranteed.
 
 ## Using the real Kaggle dataset: audit first
 
@@ -116,15 +130,18 @@ training class frequencies:
 
 ```bash
 python src/train.py --data-root data --model resnet18 --img-size 128 \
-  --epochs 8 --num-workers 4 --cache --class-weights
+  --epochs 8 --cache --class-weights  # workers are auto-tuned; override if needed
 python src/evaluate.py --ckpt checkpoints/best.pt --data-root data --img-size 128
 python src/gradcam.py  --ckpt checkpoints/best.pt --data-root data --img-size 128
 ```
 
 `evaluate.py` reports accuracy, balanced accuracy, the majority-class baseline, and a
 threshold selected on validation scores. If accuracy is below that baseline it prints a
-warning. `gradcam.py --data-root` is important: without it, Grad-CAM uses the procedural
-surrogate rather than the corpus that produced the checkpoint.
+warning. Check the training log's `data=` field: `SyntheticFaceDataset` means no real
+corpus was loaded, regardless of checkpoint filename; `--cache` only applies to real
+images. Checkpoints record their data source and root, which evaluation/Grad-CAM reuse when
+available. Otherwise, pass `--data-root` for real data. An invalid explicit root now errors
+instead of silently falling back to synthetic data.
 
 > **Reproducibility note.** No Kaggle corpus is checked into this repository. The
 > synthetic results in the report and the figures with synthetic suffixes are not real-

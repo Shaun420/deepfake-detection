@@ -323,37 +323,62 @@ class FaceFolderDataset(Dataset):
 def get_dataloaders(data_root: Optional[str], batch_size: int = 64,
                     n_train: int = 4000, n_val: int = 800, n_test: int = 1200,
                     size: int = IMG_SIZE, num_workers: int = 0, strength: float = 0.6,
-                    rescale_aug: bool = True, cache: bool = False):
-    """Return (train, val, test) loaders from a real corpus if given, else synthetic.
+                    rescale_aug: bool = True, cache: bool = False,
+                    include_test: bool = True, pin_memory: Optional[bool] = None):
+    """Return train/validation/test loaders for a real corpus or the synthetic set.
+
+    The test loader is ``None`` when ``include_test=False``.
 
     ``cache`` only changes the real-image loader: the synthetic dataset is already
-    generated and stored in RAM.  Worker-related options are kept here so training,
-    evaluation and explainability all construct datasets consistently.
+    generated and stored in RAM.  Training can set ``include_test=False`` to avoid
+    decoding/materialising a test split that it never uses.  Worker-related options
+    are kept here so training, evaluation and explainability share the same loaders.
     """
-    if data_root and os.path.isdir(os.path.join(data_root, "train")):
-        sets = [FaceFolderDataset(os.path.join(data_root, s), size,
-                                  train=(s == "train"),
+    if num_workers < 0:
+        raise ValueError("num_workers must be >= 0")
+    if pin_memory is None:
+        pin_memory = torch.cuda.is_available()
+
+    split_names = ("train", "val", "test") if include_test else ("train", "val")
+    if data_root:
+        root = Path(data_root)
+        if not root.is_dir():
+            raise FileNotFoundError(
+                f"data root '{root}' does not exist. To use the synthetic surrogate, "
+                "omit --data-root; for a real corpus, provide a root containing "
+                "train/ and val/ class folders (and test/ for evaluation).")
+        if not (root / "train").is_dir():
+            raise FileNotFoundError(
+                f"data root '{root}' has no train/ split. Expected train/{CLASSES[0]} and "
+                f"train/{CLASSES[1]} (plus val/ and, when requested, test/). "
+                "To use the synthetic surrogate, omit --data-root.")
+        sets = [FaceFolderDataset(str(root / split), size,
+                                  train=(split == "train"),
                                   rescale_aug=rescale_aug, cache=cache)
-                for s in ("train", "val", "test")]
-        source = (f"FaceFolderDataset({data_root}) "
-                  f"train={sets[0].counts} val={sets[1].counts} test={sets[2].counts}")
+                for split in split_names]
+        counts = " ".join(f"{split}={dataset.counts}"
+                          for split, dataset in zip(split_names, sets))
+        source = f"FaceFolderDataset({root}) {counts}"
     else:
-        sets = [SyntheticFaceDataset(n_train, "train", size, strength=strength,
-                                     rescale_aug=rescale_aug),
-                SyntheticFaceDataset(n_val, "val", size, strength=strength),
-                SyntheticFaceDataset(n_test, "test", size, strength=strength)]
+        sizes = {"train": n_train, "val": n_val, "test": n_test}
+        sets = [SyntheticFaceDataset(sizes[split], split, size, strength=strength,
+                                     rescale_aug=rescale_aug)
+                for split in split_names]
         source = "SyntheticFaceDataset (procedural surrogate)"
+
     loader_kwargs = dict(
         batch_size=batch_size,
         num_workers=num_workers,
-        pin_memory=torch.cuda.is_available(),
+        pin_memory=pin_memory,
         drop_last=False,
     )
     if num_workers > 0:
-        # Persistent workers avoid rebuilding an in-RAM cache at every epoch.
+        # Persistent workers avoid worker startup and cache rebuilding at every epoch.
         loader_kwargs.update(persistent_workers=True, prefetch_factor=2)
-    loaders = [DataLoader(s, shuffle=(i == 0), **loader_kwargs)
-               for i, s in enumerate(sets)]
+    loaders = [DataLoader(dataset, shuffle=(i == 0), **loader_kwargs)
+               for i, dataset in enumerate(sets)]
+    if not include_test:
+        loaders.append(None)
     return loaders[0], loaders[1], loaders[2], source
 
 
