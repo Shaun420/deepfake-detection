@@ -15,9 +15,10 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn.functional as F
-from sklearn.metrics import (accuracy_score, auc, classification_report,
-                             confusion_matrix, f1_score, precision_recall_curve,
-                             precision_score, recall_score, roc_auc_score, roc_curve)
+from sklearn.metrics import (accuracy_score, auc, balanced_accuracy_score,
+                             classification_report, confusion_matrix, f1_score,
+                             precision_recall_curve, precision_score, recall_score,
+                             roc_auc_score, roc_curve)
 
 from data import get_dataloaders
 from model import build_model
@@ -51,6 +52,23 @@ def plot_history(path="checkpoints/history_best.json", suffix=""):
     fig.tight_layout(); fig.savefig(FIG / f"training_curves{suffix}.png", dpi=140); plt.close(fig)
 
 
+def calibrate_threshold(probs: np.ndarray, labels: np.ndarray) -> tuple[float, float]:
+    """Pick the validation threshold with the best balanced accuracy.
+
+    Threshold selection is intentionally done on validation scores only.  The
+    test set remains untouched until the chosen threshold is evaluated.
+    """
+    candidates = np.unique(np.concatenate(([0.0, 0.5, 1.0], probs)))
+    scores = np.asarray([
+        balanced_accuracy_score(labels, (probs >= threshold).astype(int))
+        for threshold in candidates
+    ])
+    best = np.flatnonzero(scores == scores.max())
+    # Prefer the conventional threshold when several values are equivalent.
+    index = best[np.argmin(np.abs(candidates[best] - 0.5))]
+    return float(candidates[index]), float(scores[index])
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--ckpt", default="checkpoints/best.pt")
@@ -70,19 +88,33 @@ def main():
     model.load_state_dict(ck["state_dict"])
 
     size = args.img_size or ck.get("args", {}).get("img_size", 64)
-    *_, test_dl, source = get_dataloaders(args.data_root, args.batch_size,
-                                          n_test=args.n_test, size=size)
+    train_dl, val_dl, test_dl, source = get_dataloaders(
+        args.data_root, args.batch_size, n_test=args.n_test, size=size)
+    val_probs, val_y = collect(model, val_dl, device)
     probs, y = collect(model, test_dl, device)
+    threshold, val_balanced = calibrate_threshold(val_probs, val_y)
     pred = (probs >= 0.5).astype(int)
+    calibrated_pred = (probs >= threshold).astype(int)
 
+    majority_label = int(np.bincount(y, minlength=2).argmax())
+    majority_baseline = float(np.mean(y == majority_label))
     metrics = {
         "data_source": source,
         "n_test": int(len(y)),
         "accuracy": float(accuracy_score(y, pred)),
+        "balanced_accuracy": float(balanced_accuracy_score(y, pred)),
+        "majority_baseline_accuracy": majority_baseline,
+        "majority_baseline_label": "fake" if majority_label else "real",
         "precision_fake": float(precision_score(y, pred, zero_division=0)),
         "recall_fake": float(recall_score(y, pred, zero_division=0)),
         "f1_fake": float(f1_score(y, pred, zero_division=0)),
         "roc_auc": float(roc_auc_score(y, probs)),
+        "validation_calibrated_threshold": threshold,
+        "validation_calibrated_balanced_accuracy": val_balanced,
+        "calibrated_accuracy": float(accuracy_score(y, calibrated_pred)),
+        "calibrated_balanced_accuracy": float(
+            balanced_accuracy_score(y, calibrated_pred)),
+        "calibrated_f1_fake": float(f1_score(y, calibrated_pred, zero_division=0)),
     }
     fpr, tpr, thr = roc_curve(y, probs)
     eer_i = int(np.nanargmin(np.abs((1 - tpr) - fpr)))
@@ -92,6 +124,12 @@ def main():
 
     print(json.dumps(metrics, indent=2))
     print(classification_report(y, pred, target_names=["real", "fake"], digits=4))
+    print(f"validation-calibrated threshold: {threshold:.4f} "
+          f"(validation balanced accuracy {val_balanced:.4f})")
+    print(f"majority baseline: {metrics['majority_baseline_accuracy']:.4f} "
+          f"({metrics['majority_baseline_label']})")
+    if metrics["accuracy"] < majority_baseline:
+        print("WARNING: accuracy is below the majority-class baseline", flush=True)
     json.dump(metrics, open(f"checkpoints/test_metrics{sfx}.json", "w"), indent=2)
 
     # confusion matrix
@@ -122,7 +160,9 @@ def main():
     fig, ax = plt.subplots(figsize=(5.5, 3.8))
     ax.hist(probs[y == 0], bins=40, alpha=.65, label="real")
     ax.hist(probs[y == 1], bins=40, alpha=.65, label="fake")
-    ax.axvline(0.5, color="k", ls="--", lw=1)
+    ax.axvline(0.5, color="k", ls="--", lw=1, label="threshold 0.5")
+    ax.axvline(threshold, color="tab:red", ls=":", lw=1.2,
+                label=f"calibrated {threshold:.3f}")
     ax.set_xlabel("P(fake)"); ax.set_ylabel("count"); ax.set_title("Score distribution")
     ax.legend(); fig.tight_layout(); fig.savefig(FIG / f"score_hist{sfx}.png", dpi=140); plt.close(fig)
 

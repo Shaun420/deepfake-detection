@@ -245,6 +245,8 @@ class SyntheticFaceDataset(Dataset):
         # rendering is the bottleneck, so materialise the split once (uint8, cheap:
         # 4000 x 64 x 64 x 3 = 49 MB) and reuse it across epochs
         self.labels = [i % 2 for i in range(n)]          # perfectly balanced
+        self.counts = {c: self.labels.count(i) for i, c in enumerate(CLASSES)}
+        self.cache = True  # synthetic samples are always materialised in RAM
         self.images = np.stack([
             (make_sample(self.offset + i, self.labels[i], size, strength) * 255
              ).astype(np.uint8) for i in range(n)]) if n else np.zeros((0, size, size, 3), np.uint8)
@@ -267,9 +269,10 @@ class FaceFolderDataset(Dataset):
 
     def __init__(self, root: str, size: int = IMG_SIZE,
                  transform: Optional[Callable] = None, train: bool = False,
-                 rescale_aug: bool = True):
+                 rescale_aug: bool = True, cache: bool = False):
         root = Path(root)
         lookup = {name: label for label, names in CLASS_SYNONYMS.items() for name in names}
+        self.cache = cache
 
         self.items: list[tuple[Path, int]] = []
         seen_dirs: set[Path] = set()
@@ -294,23 +297,43 @@ class FaceFolderDataset(Dataset):
         self.transform = transform if transform is not None else build_transforms(
             train, size, rescale_aug)
 
+        # Keeping decoded RGB arrays in RAM avoids reopening and decoding every
+        # image on every epoch.  The cache deliberately stores the *raw* image;
+        # random training transforms must still run on every access.
+        self._cache: Optional[list[np.ndarray]] = None
+        if self.cache:
+            self._cache = []
+            for p, _ in self.items:
+                with Image.open(p) as image:
+                    self._cache.append(np.asarray(image.convert("RGB"), dtype=np.uint8).copy())
+
     def __len__(self):
         return len(self.items)
 
     def __getitem__(self, i):
         p, label = self.items[i]
-        return self.transform(Image.open(p).convert("RGB")), label
+        if self._cache is None:
+            with Image.open(p) as source:
+                image = source.convert("RGB")
+        else:
+            image = Image.fromarray(self._cache[i], mode="RGB")
+        return self.transform(image), label
 
 
 def get_dataloaders(data_root: Optional[str], batch_size: int = 64,
                     n_train: int = 4000, n_val: int = 800, n_test: int = 1200,
                     size: int = IMG_SIZE, num_workers: int = 0, strength: float = 0.6,
-                    rescale_aug: bool = True):
-    """Return (train, val, test) loaders from a real corpus if given, else synthetic."""
+                    rescale_aug: bool = True, cache: bool = False):
+    """Return (train, val, test) loaders from a real corpus if given, else synthetic.
+
+    ``cache`` only changes the real-image loader: the synthetic dataset is already
+    generated and stored in RAM.  Worker-related options are kept here so training,
+    evaluation and explainability all construct datasets consistently.
+    """
     if data_root and os.path.isdir(os.path.join(data_root, "train")):
         sets = [FaceFolderDataset(os.path.join(data_root, s), size,
                                   train=(s == "train"),
-                                  rescale_aug=rescale_aug)
+                                  rescale_aug=rescale_aug, cache=cache)
                 for s in ("train", "val", "test")]
         source = (f"FaceFolderDataset({data_root}) "
                   f"train={sets[0].counts} val={sets[1].counts} test={sets[2].counts}")
@@ -320,8 +343,16 @@ def get_dataloaders(data_root: Optional[str], batch_size: int = 64,
                 SyntheticFaceDataset(n_val, "val", size, strength=strength),
                 SyntheticFaceDataset(n_test, "test", size, strength=strength)]
         source = "SyntheticFaceDataset (procedural surrogate)"
-    loaders = [DataLoader(s, batch_size=batch_size, shuffle=(i == 0),
-                          num_workers=num_workers, drop_last=False)
+    loader_kwargs = dict(
+        batch_size=batch_size,
+        num_workers=num_workers,
+        pin_memory=torch.cuda.is_available(),
+        drop_last=False,
+    )
+    if num_workers > 0:
+        # Persistent workers avoid rebuilding an in-RAM cache at every epoch.
+        loader_kwargs.update(persistent_workers=True, prefetch_factor=2)
+    loaders = [DataLoader(s, shuffle=(i == 0), **loader_kwargs)
                for i, s in enumerate(sets)]
     return loaders[0], loaders[1], loaders[2], source
 

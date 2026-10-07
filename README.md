@@ -11,7 +11,7 @@ Submitted as the mini-project for the Deep Learning course.
 
 ## Headline result
 
-**Images** (2 000 held-out test images, balanced):
+**Synthetic surrogate images** (2 000 held-out test images, balanced):
 
 | Model | Test accuracy | ROC-AUC | EER | F1 (fake) |
 |---|---|---|---|---|
@@ -20,7 +20,7 @@ Submitted as the mini-project for the Deep Learning course.
 | DeepfakeCNN, no rescale aug (`cnn_noaug.pt`) | **0.8895** | **0.9627** | **0.1075** | **0.8902** |
 | **DeepfakeCNN, rescale aug — deployed (`best.pt`)** | 0.8260 | 0.9126 | 0.1805 | 0.8296 |
 
-**Video** (40 clips of known label, 12 frames sampled each):
+**Synthetic demo video** (40 procedurally generated clips of known label, 12 frames sampled each):
 
 | Model | Clip acc @64 px | Clip acc @256 px | Mean per-frame acc @256 px |
 |---|---|---|---|
@@ -48,7 +48,8 @@ src/
   video.py       frame sampling, face detection, per-frame scoring, aggregation
   video_eval.py  quantitative clip-level evaluation / resampling ablation
 tools/
-  prepare_dataset.py  import a real corpus (e.g. the Kaggle set) into data/
+  prepare_dataset.py  import and optionally normalise a real corpus into data/
+  dataset_audit.py    check image metadata for label leakage before training
   make_demo_video.py  render demo clips of known ground truth
 figures/         all generated plots
 checkpoints/     best.pt, history.json, test_metrics.json, baseline_metrics.json
@@ -78,7 +79,7 @@ python src/predict.py --ckpt checkpoints/best.pt --image some_face.jpg
 
 Everything is seeded (`--seed 42`) and runs on CPU; a GPU is used automatically if present.
 
-## Using the real Kaggle dataset
+## Using the real Kaggle dataset: audit first
 
 Target corpus: **[saurabhbagchi/deepfake-image-detection](https://www.kaggle.com/datasets/saurabhbagchi/deepfake-image-detection)**
 (504 MB, 983 files, CC0). Its archive expands to
@@ -89,36 +90,46 @@ train-20250112T065955Z-001/train/{real,fake}/...
 test-20250112T065939Z-001/test/{real,fake}/...
 ```
 
-`tools/prepare_dataset.py` reads that layout directly — it finds the class folders
-by name, **preserves the official test split**, and carves the validation set out of
-train only (no leakage):
+Do not train or write up a headline score until the image metadata has been checked.
+A model can learn a dimension, aspect-ratio, compression, or file-size shortcut rather
+than a forensic trace. The importer is intentionally torch-free, so this check can run
+before the training environment is installed:
 
 ```bash
 pip install kaggle                       # one-time; needs ~/.kaggle/kaggle.json
 kaggle datasets download -d saurabhbagchi/deepfake-image-detection
 unzip -q deepfake-image-detection.zip -d raw/
 
-python tools/prepare_dataset.py --src raw --out data --val-frac 0.15
-#   add --face-crop to store Haar-detected face crops instead of full frames
-#   add --copy      to copy files instead of symlinking
-
-python src/train.py    --data-root data --img-size 128 --epochs 20
-python src/evaluate.py --data-root data --img-size 128 --ckpt checkpoints/best.pt
-python src/gradcam.py  --ckpt checkpoints/best.pt
+python tools/prepare_dataset.py --src raw --out data --val-frac 0.15 --normalise
+python tools/dataset_audit.py --root data
 ```
 
-`--model resnet18` switches to the ImageNet-pretrained transfer baseline, which is
-the better choice at 128 px on real photographs.
+`--normalise` rewrites every output as an RGB 128 × 128 JPEG, removing the most obvious
+image-geometry shortcut. Keep the unnormalised corpus if you want to compare the audit,
+but do not silently mix the two in one experiment. The importer preserves an official
+test split and carves validation out of training only. Other corpora work the same way:
+class folders are matched case-insensitively against real/fake synonyms at any depth.
 
-> **Note.** This sandbox has no network route to kaggle.com, so the Kaggle corpus
-> could not be downloaded and trained here. The import path was verified end-to-end
-> against a mock of the exact folder structure above; the reported numbers in the
-> report are from the synthetic surrogate. Run the three commands above on your own
-> machine or in a Kaggle/Colab notebook to produce the real-data results.
+The real-corpus path uses imbalance-aware metrics and has an explicit majority baseline.
+For a faster CPU/GPU run, cache decoded images, use workers, and weight the loss by the
+training class frequencies:
 
-Other corpora (FaceForensics++, Celeb-DF, *140k Real and Fake Faces*) work the same
-way — the loader matches class folders case-insensitively against a synonym list
-(`real/original/authentic/...` vs `fake/deepfake/manipulated/...`) at any depth.
+```bash
+python src/train.py --data-root data --model resnet18 --img-size 128 \
+  --epochs 8 --num-workers 4 --cache --class-weights
+python src/evaluate.py --ckpt checkpoints/best.pt --data-root data --img-size 128
+python src/gradcam.py  --ckpt checkpoints/best.pt --data-root data --img-size 128
+```
+
+`evaluate.py` reports accuracy, balanced accuracy, the majority-class baseline, and a
+threshold selected on validation scores. If accuracy is below that baseline it prints a
+warning. `gradcam.py --data-root` is important: without it, Grad-CAM uses the procedural
+surrogate rather than the corpus that produced the checkpoint.
+
+> **Reproducibility note.** No Kaggle corpus is checked into this repository. The
+> synthetic results in the report and the figures with synthetic suffixes are not real-
+> corpus results. Run the audit and the commands above on a networked Kaggle/Colab
+> environment before claiming performance on photographic data.
 
 ## Video input
 

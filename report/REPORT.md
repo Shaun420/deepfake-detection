@@ -355,33 +355,60 @@ that averaging independent noisy per-frame scores is an effective ensemble.
 
 ---
 
-## 8. Training on the real Kaggle corpus
+## 8. Dataset reality check
 
-The intended real dataset is **`saurabhbagchi/deepfake-image-detection`** (Kaggle, 504 MB,
-983 files, CC0), which expands to `train-.../train/{real,fake}` and
-`test-.../test/{real,fake}`.
+The synthetic study above is useful for validating the pipeline, but it is not evidence
+that the detector works on photographs. The intended real corpus is
+**`saurabhbagchi/deepfake-image-detection`** (Kaggle, 504 MB, 983 files, CC0), which
+expands to `train-.../train/{real,fake}` and `test-.../test/{real,fake}`. The importer
+preserves the official test split and carves validation from training only.
 
-`tools/prepare_dataset.py` imports it: it locates class folders by name (case-insensitive
-synonym matching), **preserves the dataset's own test split**, and carves validation out of
-the training split only, so no image leaks between splits. `FaceFolderDataset` then feeds
-the identical model, and `--img-size 128 --model resnet18` adapts capacity and resolution
-to real photographs.
+### 8.1 Audit before training
+
+Before trusting a real-corpus score, `tools/dataset_audit.py` reads only image metadata
+(width, height, aspect ratio, pixel count, file size and format) and fits a shallow
+classifier. A high score means the corpus contains a shortcut that a CNN can exploit
+without looking at the pixels. The especially easy failure mode is a rule such as
+`square => fake`; `prepare_dataset.py --normalise` can rewrite all images to the same
+square RGB JPEG geometry before the audit and training run.
 
 ```bash
 kaggle datasets download -d saurabhbagchi/deepfake-image-detection
 unzip -q deepfake-image-detection.zip -d raw/
-python tools/prepare_dataset.py --src raw --out data --val-frac 0.15
-python src/train.py --data-root data --img-size 128 --epochs 20 --model resnet18
+python tools/prepare_dataset.py --src raw --out data --val-frac 0.15 --normalise
+python tools/dataset_audit.py --root data
 ```
 
-**Status and honest caveat.** The execution environment used for this project has no
-network route to kaggle.com, so this corpus could not be downloaded, and *no result in
-this report comes from it*. The import path was verified end-to-end against a mock
-reproducing the exact directory structure above (120 train / 40 test images): discovery,
-split construction, manifest, loading at 128 px, one training epoch and evaluation all
-succeeded. Re-running the four commands above on a networked machine reproduces the whole
-study on real data; the numbers in §5 and §6 are from the synthetic surrogate and should
-be read as such.
+The audit is a gate, not a guarantee: it does not detect identity overlap, duplicate
+images, or pixel-level shortcuts. Those require separate dataset checks. The repository
+contains no Kaggle download, so the audit must be run in the environment that owns `data/`.
+
+### 8.2 Real-data metrics and explainability
+
+The real-corpus code path supports an ImageNet ResNet-18 at 128 px, RAM caching and
+multiple data-loader workers. `--class-weights` compensates for label imbalance during
+training. Evaluation reports balanced accuracy and the majority-class baseline in addition
+to ordinary accuracy, and selects a decision threshold on validation scores rather than
+tuning on the test set:
+
+```bash
+python src/train.py --data-root data --model resnet18 --img-size 128 \
+  --epochs 8 --num-workers 4 --cache --class-weights
+python src/evaluate.py --ckpt checkpoints/best.pt --data-root data --img-size 128
+python src/gradcam.py  --ckpt checkpoints/best.pt --data-root data --img-size 128
+```
+
+An exploratory Kaggle run gave **0.5591 accuracy on 499 test images**, below the
+**0.7796 all-fake majority baseline**, despite **0.6944 balanced accuracy** and
+**0.786 ROC-AUC**. These numbers are a warning, not a success claim: until the audit is
+run, it is not known how much of the AUC reflects metadata leakage. The Grad-CAM command
+must include `--data-root`; otherwise it explains the procedural surrogate rather than the
+corpus used to train the checkpoint.
+
+All headline figures in §§5–7 remain synthetic. In particular, the `0.889` confusion
+matrix over 2,000 balanced images is the `cnn_noaug` surrogate result, and the demo video
+montage is `demo_real.mp4` with Haar reporting `[no face]` on all eight procedural frames.
+Those figures are labelled as synthetic and must not be presented as Kaggle results.
 
 ---
 
