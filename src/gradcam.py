@@ -15,7 +15,8 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from data import MEAN, STD, SyntheticFaceDataset
+from data import (MEAN, STD, FaceFolderDataset, SyntheticFaceDataset,
+                  build_transforms)
 from model import build_model
 
 
@@ -49,34 +50,63 @@ def denorm(t):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--ckpt", default="checkpoints/best.pt")
+    ap.add_argument("--data-root", default=None,
+                    help="real corpus root; uses its test split when present")
+    ap.add_argument("--img-size", type=int, default=None,
+                    help="override input resolution (defaults to checkpoint args)")
     ap.add_argument("--n", type=int, default=6, help="samples per class")
     args = ap.parse_args()
+    if args.n < 1:
+        ap.error("--n must be positive")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     ck = torch.load(args.ckpt, map_location=device, weights_only=False)
     model = build_model(ck.get("model", "cnn"), pretrained=False).to(device)
-    model.load_state_dict(ck["state_dict"]); model.eval()
+    model.load_state_dict(ck["state_dict"])
+    model.eval()
     cam_fn = GradCAM(model, model.cam_layer)
+    size = args.img_size or ck.get("args", {}).get("img_size", 64)
 
-    ds = SyntheticFaceDataset(args.n * 2, "test")
-    xs = torch.stack([ds[i][0] for i in range(args.n * 2)]).to(device)
-    ys = [ds[i][1] for i in range(args.n * 2)]
+    if args.data_root:
+        root = Path(args.data_root)
+        test_root = root / "test" if (root / "test").is_dir() else root
+        ds = FaceFolderDataset(
+            str(test_root), size=size,
+            transform=build_transforms(False, size), train=False)
+        by_label = {0: [], 1: []}
+        for index, (_, label) in enumerate(ds.items):
+            by_label[label].append(index)
+        if any(len(by_label[label]) < args.n for label in (0, 1)):
+            raise ValueError(f"need at least {args.n} images per class in {test_root}")
+        indices = by_label[0][:args.n] + by_label[1][:args.n]
+        source_name = f"real corpus ({test_root})"
+    else:
+        ds = SyntheticFaceDataset(
+            args.n * 2, "test", size=size,
+            transform=build_transforms(False, size))
+        indices = list(range(args.n * 2))
+        source_name = "synthetic surrogate"
+
+    samples = [ds[index] for index in indices]
+    xs = torch.stack([sample[0] for sample in samples]).to(device)
+    ys = [sample[1] for sample in samples]
     cams, probs = cam_fn(xs)
 
     cols = args.n * 2
-    fig, axes = plt.subplots(2, cols, figsize=(1.8 * cols, 4.3))
+    fig, axes = plt.subplots(2, cols, figsize=(1.8 * cols, 4.3), squeeze=False)
     for i in range(cols):
         img = denorm(xs[i])
         axes[0, i].imshow(img); axes[0, i].axis("off")
         axes[0, i].set_title(f"true={'fake' if ys[i] else 'real'}", fontsize=8)
         axes[1, i].imshow(img); axes[1, i].imshow(cams[i], cmap="jet", alpha=0.45)
         axes[1, i].axis("off")
-        axes[1, i].set_title(f"P(fake)={probs[i,1]:.2f}", fontsize=8)
-    fig.suptitle("Grad-CAM on the last convolutional block (top: input, bottom: evidence)")
+        axes[1, i].set_title(f"P(fake)={probs[i, 1]:.2f}", fontsize=8)
+    fig.suptitle(f"Grad-CAM on the last convolutional block — {source_name}")
     fig.tight_layout()
     Path("figures").mkdir(exist_ok=True)
     fig.savefig("figures/gradcam.png", dpi=140)
-    print("wrote figures/gradcam.png")
+    plt.close(fig)
+    print(f"wrote figures/gradcam.png ({source_name})")
 
 
 if __name__ == "__main__":

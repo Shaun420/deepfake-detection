@@ -58,6 +58,12 @@ def main():
     ap.add_argument("--n-train", type=int, default=4000)
     ap.add_argument("--n-val", type=int, default=800)
     ap.add_argument("--n-test", type=int, default=1200)
+    ap.add_argument("--num-workers", type=int, default=0,
+                    help="DataLoader worker processes (4 is a good starting point)")
+    ap.add_argument("--cache", action="store_true",
+                    help="decode real-corpus images into RAM before training")
+    ap.add_argument("--class-weights", action="store_true",
+                    help="weight cross-entropy by inverse training-class frequency")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--no-rescale-aug", action="store_true",
                     help="disable the resampling-robustness augmentation (ablation)")
@@ -69,15 +75,33 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     train_dl, val_dl, _, source = get_dataloaders(
         args.data_root, args.batch_size, args.n_train, args.n_val, args.n_test,
-        size=args.img_size, rescale_aug=not args.no_rescale_aug)
+        size=args.img_size, num_workers=args.num_workers,
+        rescale_aug=not args.no_rescale_aug, cache=args.cache)
 
     model = build_model(args.model, pretrained=not args.no_pretrained).to(device)
-    criterion = nn.CrossEntropyLoss(label_smoothing=0.05)
+    class_weights = None
+    if args.class_weights:
+        counts = getattr(train_dl.dataset, "counts", {})
+        total = sum(counts.values())
+        if not counts or total == 0 or any(counts.get(c, 0) == 0 for c in ("real", "fake")):
+            raise ValueError("--class-weights requires non-empty real and fake classes")
+        class_weights = torch.tensor(
+            [total / (len(counts) * counts[c]) for c in ("real", "fake")],
+            dtype=torch.float32, device=device)
+    criterion = nn.CrossEntropyLoss(weight=class_weights, label_smoothing=0.05)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.epochs)
 
+    extras = []
+    if args.cache:
+        extras.append("cache=on")
+    if args.num_workers:
+        extras.append(f"workers={args.num_workers}")
+    if args.class_weights:
+        extras.append(f"class_weights={class_weights.detach().cpu().numpy().round(3).tolist()}")
+    suffix = ("  " + " ".join(extras)) if extras else ""
     print(f"device={device}  data={source}  model={args.model} "
-          f"({count_parameters(model):,} params)")
+          f"({count_parameters(model):,} params){suffix}")
 
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
